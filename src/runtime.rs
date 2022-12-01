@@ -2,17 +2,14 @@ use std::{future::Future, io, sync::Arc};
 
 use tokio::{
     runtime::{Builder, Runtime},
-    task::{JoinError, JoinHandle},
+    task::JoinHandle,
 };
+use tracing::instrument;
 
 use crate::{
     progress::{Progress, ProgressManager, TaskProgress},
     task::{Task, TaskHandle},
 };
-
-pub enum AqueductError {
-    RuntimeError(),
-}
 
 #[derive(Debug)]
 pub struct Handle {
@@ -62,6 +59,17 @@ impl Aqueduct {
         })
     }
 
+    pub fn new_single_threaded() -> io::Result<Self> {
+        let rt = Builder::new_current_thread().enable_all().build()?;
+
+        Ok(Self {
+            handle: Arc::new(Handle {
+                progress_manager: ProgressManager::new(),
+                rt,
+            }),
+        })
+    }
+
     pub fn new(runtime: Runtime) -> Self {
         Self {
             handle: Arc::new(Handle {
@@ -79,7 +87,8 @@ impl Aqueduct {
         self.handle.progress_manager.handle(&self.handle.rt, f);
     }
 
-    pub fn spawn_task<T, R>(&self, task: T) -> JoinHandle<R>
+    #[instrument]
+    pub fn spawn_task<T, R>(&self, task: T) -> T::TaskResult
     where
         T: Task<ResultType = R>,
     {
@@ -91,12 +100,5 @@ impl Aqueduct {
             task.id(),
         );
         task.spawn(self.clone(), handle)
-    }
-
-    pub async fn run_task<T, R>(&self, task: T) -> Result<R, JoinError>
-    where
-        T: Task<ResultType = R>,
-    {
-        self.spawn_task(task).await
     }
 }
