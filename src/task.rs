@@ -60,7 +60,7 @@ impl TaskHandle {
         }
     }
 
-    #[instrument]
+    #[instrument(skip_all, fields(subtask = ?subtask))]
     pub fn run_subtask<T: Task>(&mut self, subtask: Subtask<T>) -> T::TaskResult {
         self.progress(|progress| {
             progress.set_status(ProgressStatus::Running);
@@ -69,7 +69,7 @@ impl TaskHandle {
         subtask.task.spawn(self.runtime.clone(), subtask.handle)
     }
 
-    #[instrument]
+    #[instrument(skip_all, fields(task = ?task))]
     pub fn register_subtask<T: Task>(&self, task: T) -> Subtask<T> {
         let handle = self.subtask_handle(Progress::new_waiting(task.name(), "", 0, 0), task.id());
 
@@ -91,6 +91,7 @@ impl TaskHandle {
         Subtask { task, handle }
     }
 
+    #[instrument(skip(f))]
     pub fn progress<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut Progress),
@@ -170,12 +171,13 @@ where
 
     type TaskResult = JoinHandle<Self::ResultType>;
 
-    #[instrument]
+    #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
         rt.handle
             .spawn_blocking(move || (self.function)(task_handle))
     }
 
+    #[instrument(skip(function))]
     fn new(name: &str, function: Self::FunctionType) -> Self {
         BlockingTask {
             id: TaskId::new(),
@@ -230,12 +232,13 @@ where
 
     type TaskResult = JoinHandle<Self::ResultType>;
 
-    #[instrument]
+    #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
         rt.handle
             .spawn(async move { (self.function)(task_handle).await })
     }
 
+    #[instrument(skip(function))]
     fn new(name: &str, function: Self::FunctionType) -> Self {
         Self {
             id: TaskId::new(),
@@ -291,11 +294,12 @@ where
 
     type TaskResult = Fut;
 
-    #[instrument]
-    fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
+    #[instrument(skip_all, fields(task = ?self))]
+    fn spawn(self, _rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
         (self.function)(task_handle)
     }
 
+    #[instrument(skip(function))]
     fn new(name: &str, function: Self::FunctionType) -> Self {
         Self {
             id: TaskId::new(),
@@ -347,11 +351,12 @@ where
 
     type TaskResult = R;
 
-    #[instrument]
-    fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
+    #[instrument(skip_all, fields(task = ?self))]
+    fn spawn(self, _rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
         (self.function)(task_handle)
     }
 
+    #[instrument(skip(function))]
     fn new(name: &str, function: Self::FunctionType) -> Self {
         Self {
             id: TaskId::new(),
@@ -371,21 +376,33 @@ where
 
 #[test]
 fn task_test() {
+    use tracing::info;
+    use tracing::metadata::LevelFilter;
+    use tracing_subscriber::FmtSubscriber;
+
+    let subscriber = FmtSubscriber::builder()
+        .pretty()
+        .with_thread_ids(true)
+        .with_max_level(LevelFilter::INFO)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let aque = Aqueduct::new_multi_threaded().unwrap();
 
     let atask = AsyncTask::new("async", |_| async {
-        println!("async");
+        info!("async");
     });
 
     let btask = BlockingTask::new("blocking", |_| {
-        println!("blocking");
+        info!("blocking");
     });
 
     let latask = LocalAsyncTask::new("local_async", |_| async {
-        println!("local_async");
+        info!("local_async");
     });
     let lstask = LocalSyncTask::new("local_sync", |_| {
-        println!("local_sync");
+        info!("local_sync");
     });
 
     aque.spawn_task(atask);

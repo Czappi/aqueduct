@@ -13,6 +13,8 @@ tokio = { version = "^1.0", features = [
     "fs",
     "sync",
     "rt-multi-thread",
+    "tracing",
 ] }
 tracing = "0.1.37"
 lazy_id = "0.1.0"
+tracing-subscriber = { version = "0.3.16", features = ["fmt"] }

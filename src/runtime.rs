@@ -87,7 +87,7 @@ impl Aqueduct {
         self.handle.progress_manager.handle(&self.handle.rt, f);
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn spawn_task<T, R>(&self, task: T) -> T::TaskResult
     where
         T: Task<ResultType = R>,
