@@ -51,7 +51,7 @@ impl TaskHandle {
         }
     }
 
-    pub fn subtask_handle(&self, progress: Progress, task_id: TaskId) -> Self {
+    fn subtask_handle(&self, progress: Progress, task_id: TaskId) -> Self {
         Self {
             runtime: self.runtime.clone(),
             progress,
@@ -60,8 +60,8 @@ impl TaskHandle {
         }
     }
 
-    #[instrument(skip_all, fields(subtask = ?subtask))]
-    pub fn run_subtask<T: Task>(&mut self, subtask: Subtask<T>) -> T::TaskResult {
+    #[instrument(skip_all, fields(subtask = ?subtask.task))]
+    pub fn run<T: Task>(&mut self, subtask: Subtask<T>) -> T::TaskResult {
         self.progress(|progress| {
             progress.set_status(ProgressStatus::Running);
         });
@@ -70,7 +70,7 @@ impl TaskHandle {
     }
 
     #[instrument(skip_all, fields(task = ?task))]
-    pub fn register_subtask<T: Task>(&self, task: T) -> Subtask<T> {
+    pub fn register<T: Task>(&self, task: T) -> Subtask<T> {
         let handle = self.subtask_handle(Progress::new_waiting(task.name(), "", 0, 0), task.id());
 
         let progress = handle.progress.clone();
@@ -91,7 +91,13 @@ impl TaskHandle {
         Subtask { task, handle }
     }
 
-    #[instrument(skip(f))]
+    #[instrument(skip_all, fields(task = ?task))]
+    pub fn spawn<T: Task>(&mut self, task: T) -> T::TaskResult {
+        let subtask = self.register(task);
+        self.run(subtask)
+    }
+
+    #[instrument(skip_all, fields(previous_progress = ?self.progress))]
     pub fn progress<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut Progress),
@@ -124,13 +130,13 @@ pub struct Subtask<T: Task> {
 }
 
 pub trait Task: Debug {
-    type ResultType: Send + 'static;
-    type FunctionType: ?Sized + Send + 'static;
+    type Output: Send + 'static;
+    type TaskFunction: (FnOnce(TaskHandle) -> Self::Output) + ?Sized + Send + 'static;
     type TaskResult;
 
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult;
 
-    fn new(name: &str, function: Self::FunctionType) -> Self;
+    fn new(name: &str, function: Self::TaskFunction) -> Self;
 
     fn id(&self) -> TaskId;
 
@@ -139,7 +145,7 @@ pub trait Task: Debug {
 
 pub struct BlockingTask<R, F>
 where
-    F: FnOnce(TaskHandle) -> R + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> R + Send + 'static,
     R: Send + 'static,
 {
     id: TaskId,
@@ -149,7 +155,7 @@ where
 
 impl<R, F> Debug for BlockingTask<R, F>
 where
-    F: FnOnce(TaskHandle) -> R + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> R + Send + 'static,
     R: Send + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -162,14 +168,14 @@ where
 
 impl<R, F> Task for BlockingTask<R, F>
 where
-    F: FnOnce(TaskHandle) -> R + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> R + Send + 'static,
     R: Send + 'static,
 {
-    type ResultType = R;
+    type Output = R;
 
-    type FunctionType = F;
+    type TaskFunction = F;
 
-    type TaskResult = JoinHandle<Self::ResultType>;
+    type TaskResult = JoinHandle<Self::Output>;
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
@@ -178,7 +184,7 @@ where
     }
 
     #[instrument(skip(function))]
-    fn new(name: &str, function: Self::FunctionType) -> Self {
+    fn new(name: &str, function: Self::TaskFunction) -> Self {
         BlockingTask {
             id: TaskId::new(),
             name: String::from(name),
@@ -197,7 +203,7 @@ where
 
 pub struct AsyncTask<F, Fut, R>
 where
-    F: FnOnce(TaskHandle) -> Fut + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> Fut + Send + 'static,
     R: Send + 'static,
     Fut: Future<Output = R> + Send + 'static,
 {
@@ -208,7 +214,7 @@ where
 
 impl<F, Fut, R> Debug for AsyncTask<F, Fut, R>
 where
-    F: FnOnce(TaskHandle) -> Fut + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> Fut + Send + 'static,
     R: Send + 'static,
     Fut: Future<Output = R> + Send + 'static,
 {
@@ -222,24 +228,23 @@ where
 
 impl<F, Fut, R> Task for AsyncTask<F, Fut, R>
 where
-    F: FnOnce(TaskHandle) -> Fut + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> Fut + Send + 'static,
     R: Send + 'static,
     Fut: Future<Output = R> + Send + 'static,
 {
-    type ResultType = R;
+    type Output = Fut;
 
-    type FunctionType = F;
+    type TaskFunction = F;
 
-    type TaskResult = JoinHandle<Self::ResultType>;
+    type TaskResult = JoinHandle<R>;
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
-        rt.handle
-            .spawn(async move { (self.function)(task_handle).await })
+        rt.handle.spawn((self.function)(task_handle))
     }
 
     #[instrument(skip(function))]
-    fn new(name: &str, function: Self::FunctionType) -> Self {
+    fn new(name: &str, function: Self::TaskFunction) -> Self {
         Self {
             id: TaskId::new(),
             name: name.to_owned(),
@@ -259,7 +264,7 @@ where
 // TODO: Implement LocalAsyncTask
 struct LocalAsyncTask<F, Fut, R>
 where
-    F: FnOnce(TaskHandle) -> Fut + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> Fut + Send + 'static,
     R: Send + 'static,
     Fut: Future<Output = R> + Send + 'static,
 {
@@ -270,7 +275,7 @@ where
 
 impl<F, Fut, R> Debug for LocalAsyncTask<F, Fut, R>
 where
-    F: FnOnce(TaskHandle) -> Fut + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> Fut + Send + 'static,
     R: Send + 'static,
     Fut: Future<Output = R> + Send + 'static,
 {
@@ -284,15 +289,15 @@ where
 
 impl<F, Fut, R> Task for LocalAsyncTask<F, Fut, R>
 where
-    F: FnOnce(TaskHandle) -> Fut + Send + Copy + 'static,
+    F: FnOnce(TaskHandle) -> Fut + Send + 'static,
     R: Send + 'static,
     Fut: Future<Output = R> + Send + 'static,
 {
-    type ResultType = R;
+    type Output = Fut;
 
-    type FunctionType = F;
+    type TaskFunction = F;
 
-    type TaskResult = Fut;
+    type TaskResult = Self::Output;
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, _rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
@@ -300,7 +305,7 @@ where
     }
 
     #[instrument(skip(function))]
-    fn new(name: &str, function: Self::FunctionType) -> Self {
+    fn new(name: &str, function: Self::TaskFunction) -> Self {
         Self {
             id: TaskId::new(),
             name: name.to_owned(),
@@ -319,7 +324,7 @@ where
 
 struct LocalSyncTask<F, R>
 where
-    F: (FnOnce(TaskHandle) -> R) + Send + Copy + 'static,
+    F: (FnOnce(TaskHandle) -> R) + Send + 'static,
     R: Send + 'static,
 {
     id: TaskId,
@@ -329,7 +334,7 @@ where
 
 impl<F, R> Debug for LocalSyncTask<F, R>
 where
-    F: (FnOnce(TaskHandle) -> R) + Send + Copy + 'static,
+    F: (FnOnce(TaskHandle) -> R) + Send + 'static,
     R: Send + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -342,14 +347,14 @@ where
 
 impl<F, R> Task for LocalSyncTask<F, R>
 where
-    F: (FnOnce(TaskHandle) -> R) + Send + Copy + 'static,
+    F: (FnOnce(TaskHandle) -> R) + Send + 'static,
     R: Send + 'static,
 {
-    type ResultType = R;
+    type Output = R;
 
-    type FunctionType = F;
+    type TaskFunction = F;
 
-    type TaskResult = R;
+    type TaskResult = Self::Output;
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, _rt: Aqueduct, task_handle: TaskHandle) -> Self::TaskResult {
@@ -357,7 +362,7 @@ where
     }
 
     #[instrument(skip(function))]
-    fn new(name: &str, function: Self::FunctionType) -> Self {
+    fn new(name: &str, function: Self::TaskFunction) -> Self {
         Self {
             id: TaskId::new(),
             name: name.to_owned(),
@@ -389,8 +394,27 @@ fn task_test() {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let aque = Aqueduct::new_multi_threaded().unwrap();
+    let d = String::from("asdas");
+    let atask = AsyncTask::new("async", move |mut handle| async move {
+        info!(d);
+        let subtask = handle.register(BlockingTask::new("blocking subtask", |_| {
+            info!("blocking subtask");
+        }));
+        handle.run(subtask);
+        handle
+            .runtime
+            .spawn(BlockingTask::new("blocking subtask2", |_| {
+                info!("blocking subtask2");
+            }));
 
-    let atask = AsyncTask::new("async", |_| async {
+        let subtask = handle.register(AsyncTask::new("async subtask", |_| async {
+            info!("async subtask");
+        }));
+
+        handle.run(subtask);
+
+        //handle.runtime.handle.spawn_blocking(|| info!("hehe"));
+
         info!("async");
     });
 
@@ -405,10 +429,10 @@ fn task_test() {
         info!("local_sync");
     });
 
-    aque.spawn_task(atask);
-    aque.spawn_task(btask);
-    aque.spawn_task(lstask);
-    let latask_future = aque.spawn_task(latask);
+    aque.spawn(atask);
+    aque.spawn(btask);
+    aque.spawn(lstask);
+    let latask_future = aque.spawn(latask);
 
     aque.handle.spawn(async {
         latask_future.await;
