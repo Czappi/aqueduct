@@ -7,6 +7,7 @@ name = "aqueduct"
 version = "0.1.0"
 dependencies = [
  "lazy_id",
+ "once_cell",
  "tokio",
  "tracing",
  "tracing-subscriber",

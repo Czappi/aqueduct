@@ -88,9 +88,9 @@ impl Aqueduct {
     }
 
     #[instrument(skip(self))]
-    pub fn spawn<T, R>(&self, task: T) -> T::TaskResult
+    pub fn spawn<FunctionOutput, Output, T>(&self, task: T) -> Output
     where
-        T: Task<Output = R>,
+        T: Task<FunctionOutput, Output>,
     {
         let handle = TaskHandle::new(
             Aqueduct {
