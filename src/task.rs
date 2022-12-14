@@ -1,9 +1,4 @@
-use std::{
-    fmt::Debug,
-    future::{Future, IntoFuture},
-    marker::PhantomData,
-    pin::Pin,
-};
+use std::{fmt::Debug, future::Future, marker::PhantomData, pin::Pin};
 
 use lazy_id::Id;
 use tokio::task::JoinHandle;
