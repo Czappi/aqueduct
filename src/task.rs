@@ -4,10 +4,9 @@ use lazy_id::Id;
 use tokio::task::JoinHandle;
 use tracing::instrument;
 
-use crate::{
-    progress::{Progress, ProgressStatus},
-    runtime::Aqueduct,
-};
+use crate::runtime::Aqueduct;
+
+use self::handle::TaskHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TaskId(u64);
@@ -24,119 +23,160 @@ impl Default for TaskId {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TaskHandle {
-    pub runtime: Aqueduct,
-    pub progress: Progress,
-    pub task_id: TaskId,
-    send_progress: bool,
-}
+pub mod handle {
+    use std::{future::Future, marker::PhantomData};
 
-impl TaskHandle {
-    pub fn new(runtime: Aqueduct, progress: Progress, task_id: TaskId) -> Self {
-        Self {
-            runtime,
-            progress,
-            task_id,
-            send_progress: true,
+    use tracing::instrument;
+
+    use crate::{
+        progress::{Progress, ProgressStatus},
+        runtime::Aqueduct,
+    };
+
+    use super::{LocalTask, Subtask, Task, TaskId, TokioTask};
+
+    #[derive(Debug, Clone)]
+    pub struct TaskHandle {
+        pub runtime: Aqueduct,
+        pub progress: Progress,
+        pub task_id: TaskId,
+        send_progress: bool,
+    }
+
+    impl TaskHandle {
+        pub fn new(runtime: Aqueduct, progress: Progress, task_id: TaskId) -> Self {
+            Self {
+                runtime,
+                progress,
+                task_id,
+                send_progress: true,
+            }
         }
-    }
 
-    pub fn new_silent(runtime: Aqueduct, progress: Progress, task_id: TaskId) -> Self {
-        Self {
-            runtime,
-            progress,
-            task_id,
-            send_progress: false,
+        pub fn new_silent(runtime: Aqueduct, progress: Progress, task_id: TaskId) -> Self {
+            Self {
+                runtime,
+                progress,
+                task_id,
+                send_progress: false,
+            }
         }
-    }
 
-    fn subtask_handle(&self, progress: Progress, task_id: TaskId) -> Self {
-        Self {
-            runtime: self.runtime.clone(),
-            progress,
-            task_id,
-            send_progress: self.send_progress,
+        fn subtask_handle(&self, progress: Progress, task_id: TaskId) -> Self {
+            Self {
+                runtime: self.runtime.clone(),
+                progress,
+                task_id,
+                send_progress: self.send_progress,
+            }
         }
-    }
 
-    #[instrument(skip_all, fields(subtask = ?subtask.task))]
-    pub fn run<FunctionOutput, Output, T: Task<FunctionOutput, Output>>(
-        &mut self,
-        subtask: Subtask<FunctionOutput, Output, T>,
-    ) -> Output {
-        self.progress(|progress| {
-            progress.set_status(ProgressStatus::Running);
-        });
-
-        subtask.task.spawn(self.runtime.clone(), subtask.handle)
-    }
-
-    #[instrument(skip_all, fields(task = ?task))]
-    pub fn register<FunctionOutput, Output, T: Task<FunctionOutput, Output>>(
-        &self,
-        task: T,
-    ) -> Subtask<FunctionOutput, Output, T> {
-        let handle = self.subtask_handle(Progress::new_waiting(task.name(), "", 0, 0), task.id());
-
-        let progress = handle.progress.clone();
-        let rt = self.runtime.clone();
-        let subtask_id = task.id();
-        let task_id = self.task_id.clone();
-
-        if self.send_progress {
-            self.runtime.handle.spawn(async move {
-                rt.handle
-                    .progress_manager
-                    .add_subtask(&task_id, subtask_id, progress)
-                    .await;
-                rt.handle.progress_manager.send_task_progress(task_id).await;
+        #[instrument(skip_all, fields(subtask = ?subtask.task))]
+        pub fn run<FunctionOutput, Output, T: Task<FunctionOutput, Output>>(
+            &mut self,
+            subtask: Subtask<FunctionOutput, Output, T>,
+        ) -> Output {
+            self.progress(|progress| {
+                progress.set_status(ProgressStatus::Running);
             });
+
+            subtask.task.spawn(self.runtime.clone(), subtask.handle)
         }
 
-        Subtask {
-            task,
-            handle,
-            _output: PhantomData,
-            _function_output: PhantomData,
+        #[instrument(skip_all, fields(task = ?task))]
+        pub fn register<FunctionOutput, Output, T: Task<FunctionOutput, Output>>(
+            &self,
+            task: T,
+        ) -> Subtask<FunctionOutput, Output, T> {
+            let handle =
+                self.subtask_handle(Progress::new_waiting(task.name(), "", 0, 0), task.id());
+
+            let progress = handle.progress.clone();
+            let rt = self.runtime.clone();
+            let subtask_id = task.id();
+            let task_id = self.task_id.clone();
+
+            if self.send_progress {
+                self.runtime.handle.spawn(async move {
+                    rt.handle
+                        .progress_manager
+                        .add_subtask(&task_id, subtask_id, progress)
+                        .await;
+                    rt.handle.progress_manager.send_task_progress(task_id).await;
+                });
+            }
+
+            Subtask {
+                task,
+                handle,
+                _output: PhantomData,
+                _function_output: PhantomData,
+            }
         }
-    }
 
-    #[instrument(skip_all, fields(task = ?task))]
-    pub fn spawn<FunctionOutput, Output, T: Task<FunctionOutput, Output>>(
-        &mut self,
-        task: T,
-    ) -> Output {
-        let subtask = self.register(task);
-        self.run(subtask)
-    }
+        #[instrument(skip_all, fields(task = ?task))]
+        pub fn spawn<FunctionOutput, Output, T: Task<FunctionOutput, Output>>(
+            &mut self,
+            task: T,
+        ) -> Output {
+            let subtask = self.register(task);
+            self.run(subtask)
+        }
 
-    #[instrument(skip_all, fields(previous_progress = ?self.progress))]
-    pub fn progress<F>(&mut self, mut f: F)
-    where
-        F: FnMut(&mut Progress),
-    {
-        let mut progress = self.progress.clone();
+        #[instrument(skip_all, fields(task = ?task))]
+        pub fn join_local<Output, T: LocalTask<Output>>(&mut self, task: T) -> T::TaskOutput {
+            let subtask = self.register(task);
 
-        (f)(&mut progress);
-
-        self.progress = progress.clone();
-
-        let rt = self.runtime.clone();
-        let task_id = self.task_id.clone();
-
-        if self.send_progress {
-            self.runtime.handle.spawn(async move {
-                rt.handle
-                    .progress_manager
-                    .update_task(task_id.clone(), progress)
-                    .await;
-                rt.handle.progress_manager.send_task_progress(task_id).await;
+            self.progress(|progress| {
+                progress.set_status(ProgressStatus::Running);
             });
+
+            subtask.task.function(subtask.handle)
+        }
+
+        #[instrument(skip_all, fields(task = ?task))]
+        pub fn join_tokio<Output, T: TokioTask<Output>>(
+            &mut self,
+            task: T,
+        ) -> tracing::instrument::Instrumented<T::TaskOutput>
+        where
+            T::TaskOutput: Future,
+        {
+            let subtask = self.register(task);
+
+            self.progress(|progress| {
+                progress.set_status(ProgressStatus::Running);
+            });
+
+            tracing::Instrument::in_current_span(subtask.task.function(subtask.handle))
+        }
+
+        #[instrument(skip_all, fields(previous_progress = ?self.progress))]
+        pub fn progress<F>(&mut self, mut f: F)
+        where
+            F: FnMut(&mut Progress),
+        {
+            let mut progress = self.progress.clone();
+
+            (f)(&mut progress);
+
+            self.progress = progress.clone();
+
+            let rt = self.runtime.clone();
+            let task_id = self.task_id.clone();
+
+            if self.send_progress {
+                self.runtime.handle.spawn(async move {
+                    rt.handle
+                        .progress_manager
+                        .update_task(task_id.clone(), progress)
+                        .await;
+                    rt.handle.progress_manager.send_task_progress(task_id).await;
+                });
+            }
         }
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct Subtask<FunctionOutput, Output, T: Task<FunctionOutput, Output>> {
     pub task: T,
@@ -152,6 +192,8 @@ pub trait Task<T, R>: Debug {
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> R;
 
     fn new(name: &str, function: Self::TaskFunction) -> Self;
+
+    fn function(self, task_handle: TaskHandle) -> Self::TaskOutput;
 
     fn id(&self) -> TaskId;
 
@@ -182,8 +224,7 @@ where
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> JoinHandle<T> {
-        rt.handle
-            .spawn_blocking(move || (self.function)(task_handle))
+        rt.handle.spawn_blocking(move || self.function(task_handle))
     }
 
     #[instrument(skip(function))]
@@ -201,6 +242,10 @@ where
 
     fn name(&self) -> String {
         self.name.clone()
+    }
+
+    fn function(self, task_handle: TaskHandle) -> Self::TaskOutput {
+        (self.function)(task_handle)
     }
 }
 
@@ -246,7 +291,7 @@ where
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, rt: Aqueduct, task_handle: TaskHandle) -> JoinHandle<T> {
-        rt.handle.spawn((self.function)(task_handle))
+        rt.handle.spawn(self.function(task_handle))
     }
 
     #[instrument(skip(function))]
@@ -264,6 +309,10 @@ where
 
     fn name(&self) -> String {
         self.name.clone()
+    }
+
+    fn function(self, task_handle: TaskHandle) -> Self::TaskOutput {
+        (self.function)(task_handle)
     }
 }
 
@@ -336,7 +385,7 @@ where
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, _rt: Aqueduct, task_handle: TaskHandle) -> BoxFuture<T> {
-        Box::pin((self.function)(task_handle))
+        Box::pin(self.function(task_handle))
     }
 
     #[instrument(skip(function))]
@@ -354,6 +403,10 @@ where
 
     fn name(&self) -> String {
         self.name.clone()
+    }
+
+    fn function(self, task_handle: TaskHandle) -> Self::TaskOutput {
+        (self.function)(task_handle)
     }
 }
 
@@ -397,7 +450,7 @@ where
 
     #[instrument(skip_all, fields(task = ?self))]
     fn spawn(self, _rt: Aqueduct, task_handle: TaskHandle) -> T {
-        (self.function)(task_handle)
+        self.function(task_handle)
     }
 
     #[instrument(skip(function))]
@@ -415,6 +468,10 @@ where
 
     fn name(&self) -> String {
         self.name.clone()
+    }
+
+    fn function(self, task_handle: TaskHandle) -> Self::TaskOutput {
+        (self.function)(task_handle)
     }
 }
 
@@ -463,10 +520,30 @@ fn task_test() {
         })
     }
 
+    fn test_join_local() -> impl TokioTask<String> {
+        AsyncTask::new("test_join_local", |mut handle| async move {
+            handle.join_local(LocalSyncTask::new("test_join_local2", |_| {
+                info!("test_join_local");
+                String::from("test_join_local")
+            }))
+        })
+    }
+
+    fn test_join_tokio() -> impl TokioTask<String> {
+        AsyncTask::new("test_join_tokio", |mut handle| async move {
+            handle
+                .join_tokio(AsyncTask::new("test_join_tokio2", |_| async {
+                    info!("test_join_tokio");
+                    String::from("test_join_tokio")
+                }))
+                .await
+        })
+    }
+
     let subscriber = FmtSubscriber::builder()
         .pretty()
         .with_thread_ids(true)
-        .with_max_level(LevelFilter::INFO)
+        .with_max_level(LevelFilter::TRACE)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -488,4 +565,10 @@ fn task_test() {
     let _local_sync = AQUE
         .get_or_init(|| aque_runtime.clone())
         .spawn(test_local_sync());
+    let _join_local = AQUE
+        .get_or_init(|| aque_runtime.clone())
+        .spawn(test_join_local());
+    let _join_tokio = AQUE
+        .get_or_init(|| aque_runtime.clone())
+        .spawn(test_join_tokio());
 }

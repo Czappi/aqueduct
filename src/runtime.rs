@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use crate::{
     progress::{Progress, ProgressManager, TaskProgress},
-    task::{Task, TaskHandle},
+    task::{handle::TaskHandle, Task},
 };
 
 #[derive(Debug)]
