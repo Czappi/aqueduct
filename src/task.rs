@@ -357,7 +357,7 @@ where
     }
 }
 
-struct LocalSyncTask<F, T>
+pub struct LocalSyncTask<F, T>
 where
     F: (FnOnce(TaskHandle) -> T) + Send + 'static,
     T: Send + 'static,
