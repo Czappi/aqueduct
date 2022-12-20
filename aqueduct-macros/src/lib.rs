@@ -72,15 +72,14 @@ fn make_tokio_return_type(return_type: &ReturnType) -> proc_macro2::TokenStream 
     }
 }
 
-fn make_task_asyncness(asyncness: Option<Async>, task_type: &TaskType) -> proc_macro2::TokenStream {
+fn make_task_asyncness(
+    _asyncness: Option<Async>,
+    task_type: &TaskType,
+) -> proc_macro2::TokenStream {
     match task_type {
         TaskType::Normal => {
-            if let Some(token) = asyncness {
-                token.to_token_stream()
-            } else {
-                quote!(async)
-            }
+            quote!(async move)
         }
-        TaskType::Blocking => quote!(||),
+        TaskType::Blocking => quote!(move ||),
     }
 }
