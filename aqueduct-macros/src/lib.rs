@@ -39,10 +39,12 @@ fn make_task(input: TokenStream, task_type: TaskType) -> TokenStream {
     let fn_block = ast.block.to_token_stream();
     let task_asyncness = make_task_asyncness(ast.sig.asyncness, &task_type);
     let runtime_method = make_runtime_method(&task_type);
+    let fn_token = ast.sig.fn_token.to_token_stream();
+    let visibility = ast.vis.to_token_stream();
 
     let output = quote! {
         #[tracing::instrument]
-        fn #task_fn_name (#task_input) #task_return_type {
+        #visibility #fn_token #task_fn_name (#task_input) #task_return_type {
             aqueduct::runtime::AQUEDUCT_RUNTIME. #runtime_method ( #task_asyncness
                 #fn_block
             )
