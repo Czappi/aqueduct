@@ -42,6 +42,10 @@ impl Aqueduct {
     {
         self.runtime.spawn_blocking(func)
     }
+
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
+    }
 }
 
 impl Default for Aqueduct {
