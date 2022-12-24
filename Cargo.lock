@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "aqueduct"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "aqueduct-macros",
  "lazy_id",
