@@ -12,19 +12,17 @@ pub struct Aqueduct {
 }
 
 impl Aqueduct {
-    fn new_multi_threaded() -> Self {
+    #[cfg(feature = "multi-threaded")]
+    fn new() -> Self {
         let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
         Self { runtime }
     }
 
-    fn new_single_threaded() -> Self {
+    #[cfg(feature = "single-threaded")]
+    fn new() -> Self {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
 
         Self { runtime }
-    }
-
-    pub fn new() -> Self {
-        Aqueduct::new_multi_threaded()
     }
 
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
@@ -43,8 +41,15 @@ impl Aqueduct {
         self.runtime.spawn_blocking(func)
     }
 
+    #[cfg(feature = "single-threaded")]
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.runtime.block_on(future)
+    }
+
+    #[cfg(feature = "multi-threaded")]
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        let _guard = self.runtime.enter();
+        tokio::task::block_in_place(move || self.runtime.block_on(future))
     }
 }
 
