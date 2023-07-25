@@ -67,18 +67,19 @@ fn main() {
 #[derive(aqueduct::Wire)]
 pub struct ExampleStruct {
     text: String,
+    // no `aqueduct::Wire` implementation, but have serde::Seralize and serde::Deserialize implementation
+    #[wire(serde)]
     other: OtherStruct
 }
 ```
 
 ## :construction: Manual implementation
 
-For external type wrappers.
-
 ```rust
 pub struct ExampleStruct {
     text: String,
-    other: OtherStruct // this have the `aqueduct::Wire` derive macro too 
+    // no `aqueduct::Wire` implementation, but have serde::Seralize and serde::Deserialize implementation
+    other: OtherStruct
 }
 
 impl ExampleStruct {
@@ -97,7 +98,8 @@ impl TypeDescription for ExampleStruct {
         // every type here have to implement the [Wire] trait
         TypeDescriptor::struct("ExampleStruct") // this have to be the exact same as the struct name
             .field::<String>("text") // these have to be the exact same as the fields
-            .field::<OtherStruct>("other")
+            // serde fields flattened in the wire type and regain original form on the dart side  
+            .serde_field("OtherStruct")
             // future feature?
             .method(
                 TypeDescriptor::function::<u64>::("example_method") // this have to be the exact same as the method name
